@@ -1,0 +1,10 @@
+torch>=2.0
+modelscope>=1.20
+opencc
+pandas
+soundfile
+transformers>=4.45
+funasr>=1.0
+qwen-asr>=0.0.6
+accelerate
+librosa
