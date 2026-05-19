@@ -1,0 +1,71 @@
+系统 C v2.2 视频处理系统 — 使用说明
+========================================
+
+【硬件要求】
+  GPU: NVIDIA 8GB+ VRAM
+  内存: 16GB+
+  磁盘: 输入视频大小 × 3
+  系统: Windows 10/11
+
+【安装步骤】
+
+  1. 安装 Python 依赖
+     pip install -r requirements.txt
+
+  2. 下载模型（约 7 GB，仅首次）
+     python download_models.py
+
+  3. 检查环境
+     python check_env.py
+     全部 PASS 后再继续。
+
+【启动批处理】
+
+  python 01_脚本\batch_system_c_cut_v2.py --inbox "你的视频目录" --batch-dir "输出目录"
+
+  参数说明：
+    --inbox       输入视频所在的文件夹（必填）
+    --batch-dir   输出结果放到哪个文件夹（必填）
+    --force       强制重跑 ASR（已有结果也重跑）
+    --limit N     只处理前 N 个视频
+
+  示例：
+    python 01_脚本\batch_system_c_cut_v2.py --inbox "G:\直播视频" --batch-dir "D:\处理结果"
+
+【中断后续跑】
+
+  直接重新执行相同命令即可，已完成的 ASR 会自动跳过：
+    python 01_脚本\batch_system_c_cut_v2.py --inbox "G:\直播视频" --batch-dir "D:\处理结果"
+
+  如果要全部重跑，加 --force：
+    python 01_脚本\batch_system_c_cut_v2.py --inbox "G:\直播视频" --batch-dir "D:\处理结果" --force
+
+【输出文件】
+
+  每个视频会在输出目录下生成一个子文件夹：
+    输出目录\视频名_SYSTEM_C_CUT_V2_01\
+      ├── 视频名_cut_final_CLEAN_SYSTEM_C_CUT_V2_01.mp4  ← 最终成品
+      └── 视频名_cut_filter_CLEAN_SYSTEM_C_CUT_V2_01.txt ← 违禁词命中列表
+
+【注意事项】
+
+  - 输入视频支持 .mp4 和 .ts 格式
+  - 视频文件名避免中文特殊字符，建议英文/数字编号
+  - 磁盘空间要够：输入视频总大小 × 3
+  - 启动前确保没有其他程序占用 GPU 显存
+  - Windows 需要安装 Visual C++ 运行库和 CUDA Toolkit
+
+【常见问题】
+
+  Q: check_env.py 报模型未下载？
+  A: 运行 python download_models.py
+
+  Q: 处理到一半电脑重启了？
+  A: 直接重新执行相同命令，会自动续跑
+
+  Q: 最终 MP4 打不开？
+  A: 不要慌，中间文件还在。用 ffmpeg 重建：
+     ffmpeg -i 输出目录\视频名_SYSTEM_C_CUT_V2_01\06_output_video\视频名_segments\concat_output.ts -c copy -movflags +faststart 恢复.mp4
+
+  Q: 显存不够？
+  A: 确保 GPU 有 8GB VRAM，启动前关闭其他 GPU 程序
