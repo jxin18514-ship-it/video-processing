@@ -39,11 +39,42 @@ python check_env.py
 
 全部 PASS 后再启动批处理。
 
-### 4. 启动批处理
+### 4. 启动批处理（推荐：使用 supervisor）
+
+**第一步 — dry-run 预览：**
 
 ```bash
-python 01_脚本\batch_system_c_cut_v2.py --inbox "你的视频目录" --batch-dir "输出目录"
+python 01_脚本\batch_supervisor.py --inbox "你的视频目录" --batch-dir "输出目录" --dry-run
 ```
+
+dry-run 会扫描视频、按文件名前缀自动分组、计算每组 target_fps，生成 `logs/group_target_fps.json`，不启动任何子进程。
+
+**第二步 — 正式处理：**
+
+```bash
+python 01_脚本\batch_supervisor.py --inbox "你的视频目录" --batch-dir "输出目录"
+```
+
+supervisor 会自动：
+- 按文件名前缀分组（如 `kt (1).ts`, `kt (2).ts` → 组 `kt`）
+- 每组计算 target_fps：全 45 → 45，全 60 → 60，45/60 混合 → 45
+- 逐视频调用 `batch_system_c_cut_v2.py --video --target-fps`
+- 写 `supervisor_status.json` 追踪进度
+- 支持中断后续跑（自动跳过已完成视频）
+
+**第三步 — 全部 PASS 后合并：**
+
+```bash
+python 01_脚本\merge_after_process.py --batch-dir "输出目录" --mode FULL_HQ --fps 45 --video-bitrate 10M
+```
+
+合并流程：
+- 从 `logs/group_target_fps.json` 自动读取分组
+- FULL_HQ 模式：每组全部 PASS 才合并
+- 参数一致走 `-c copy`（无重编码，秒级完成）
+- 参数不一致不会自动回退重编码，需人工确认
+- **默认不加 `+faststart`**（本地播放/上传不需要）
+- 需要 `+faststart` 时加 `--faststart`
 
 **参数说明：**
 
@@ -59,14 +90,22 @@ python 01_脚本\batch_system_c_cut_v2.py --inbox "你的视频目录" --batch-d
 ### 5. 示例
 
 ```bash
-# 处理 G 盘视频目录，输出放到 D 盘
-python 01_脚本\batch_system_c_cut_v2.py --inbox "G:\直播视频\今天" --batch-dir "D:\处理结果"
+# === 推荐流程（supervisor + merge） ===
 
-# 续跑：ASR 已有 CSV 的会自动跳过
-python 01_脚本\batch_system_c_cut_v2.py --inbox "G:\直播视频\今天" --batch-dir "D:\处理结果"
+# 1. dry-run 预览分组和 target_fps
+python 01_脚本\batch_supervisor.py --inbox "D:\待处理视频" --batch-dir "D:\处理结果" --dry-run
 
-# 强制全部重跑
-python 01_脚本\batch_system_c_cut_v2.py --inbox "G:\直播视频\今天" --batch-dir "D:\处理结果" --force
+# 2. 正式处理 50 个视频
+python 01_脚本\batch_supervisor.py --inbox "D:\待处理视频" --batch-dir "D:\处理结果"
+
+# 3. 中断后续跑（相同命令）
+python 01_脚本\batch_supervisor.py --inbox "D:\待处理视频" --batch-dir "D:\处理结果"
+
+# 4. 全部 PASS 后合并（dry-run 预览）
+python 01_脚本\merge_after_process.py --batch-dir "D:\处理结果" --mode FULL_HQ --fps 45 --video-bitrate 10M
+
+# 5. 确认后执行合并
+python 01_脚本\merge_after_process.py --batch-dir "D:\处理结果" --mode FULL_HQ --fps 45 --video-bitrate 10M --merge
 ```
 
 ## 管道流程（9 阶段）
@@ -112,7 +151,9 @@ ffmpeg -i 输出目录\视频名_SYSTEM_C_CUT_V2_01\06_output_video\视频名_se
 ├── check_env.py             ← 环境自检
 ├── 00_长期规则.md            ← 操作规则手册
 ├── 01_脚本/
-│   ├── batch_system_c_cut_v2.py
+│   ├── batch_supervisor.py          ← 批处理调度（推荐入口）
+│   ├── batch_system_c_cut_v2.py     ← 单视频处理
+│   ├── merge_after_process.py       ← 合并输出
 │   └── wanxiang_recheck_asr_v2_pipeline.py
 ├── 02_词库/
 │   ├── bad_words.txt

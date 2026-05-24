@@ -84,6 +84,49 @@ def ffprobe(path: Path, fast: bool = False) -> dict:
     raw = subprocess.check_output(cmd, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
     return json.loads(raw)
 
+def get_video_fps(video_path: Path) -> float | None:
+    """Read true frame rate, r_frame_rate first, avg_frame_rate fallback."""
+    entries = "stream=r_frame_rate,avg_frame_rate"
+    cmd = ["ffprobe","-v","error","-select_streams","v:0",
+           "-show_entries",entries,"-of","json",str(video_path)]
+    try:
+        raw = subprocess.check_output(cmd, text=True, encoding="utf-8", errors="replace",
+                                      creationflags=subprocess.CREATE_NO_WINDOW)
+        info = json.loads(raw)
+        streams = info.get("streams", [])
+        if not streams:
+            return None
+        vs = streams[0]
+        for key in ("r_frame_rate", "avg_frame_rate"):
+            val = vs.get(key, "")
+            if val and "/" in val:
+                num, den = val.split("/", 1)
+                if float(den) != 0:
+                    return float(num) / float(den)
+        return None
+    except Exception:
+        return None
+
+def build_video_encode_args(target_fps: int) -> list[str]:
+    """Return NVENC encode args including -r/-fps_mode cfr. RuntimeError for unsupported fps."""
+    if target_fps == 45:
+        return ["-r","45","-fps_mode","cfr",
+                "-c:v","h264_nvenc","-preset","p4","-rc","vbr",
+                "-b:v","12M","-maxrate","15M","-bufsize","24M",
+                "-pix_fmt","yuv420p",
+                "-colorspace","bt709","-color_primaries","bt709",
+                "-color_trc","bt709","-color_range","tv",
+                "-c:a","aac","-b:a","128k"]
+    if target_fps == 60:
+        return ["-r","60","-fps_mode","cfr",
+                "-c:v","h264_nvenc","-preset","p4","-rc","vbr",
+                "-b:v","15M","-maxrate","18M","-bufsize","30M",
+                "-pix_fmt","yuv420p",
+                "-colorspace","bt709","-color_primaries","bt709",
+                "-color_trc","bt709","-color_range","tv",
+                "-c:a","aac","-b:a","128k"]
+    raise RuntimeError(f"Unsupported target_fps: {target_fps} (only 45 and 60 are supported)")
+
 def dirs(base: Path) -> None:
     for name in ["01_video_info","02_asr","03_recheck","04_detection","05_cut_plan","06_output_video","07_reports","08_logs"]:
         (base / name).mkdir(parents=True, exist_ok=True)
@@ -536,7 +579,9 @@ def write_full_review(pipe, main_asr: pd.DataFrame, review: pd.DataFrame, out: P
         full.to_excel(writer, index=False, sheet_name="FULL_transcript_review")
     return full
 
-def generate_cut_video(video: Path, base: Path, tag: str, cut_plan: pd.DataFrame, force: bool) -> tuple[Path,Path,Path]:
+def generate_cut_video(video: Path, base: Path, tag: str, cut_plan: pd.DataFrame,
+                      force: bool, target_fps: int) -> tuple[Path,Path,Path]:
+    encode_args = build_video_encode_args(target_fps)
     plan_out = base / "05_cut_plan" / f"{tag}_cut_plan_CLEAN_{RUN_TAG}.xlsx"
     filter_out = base / "06_output_video" / f"{tag}_cut_filter_CLEAN_{RUN_TAG}.txt"
     video_out = base / "06_output_video" / f"{tag}_cut_final_CLEAN_{RUN_TAG}.mp4"
@@ -573,7 +618,7 @@ def generate_cut_video(video: Path, base: Path, tag: str, cut_plan: pd.DataFrame
                     # first segment: output-side seeking from beginning (accurate)
                     run(["ffmpeg","-y","-hide_banner","-loglevel","error",
                          "-i",str(video),"-ss","0","-t",str(end-start),
-                         "-c:v","h264_nvenc","-preset","p1","-c:a","aac",
+                         *encode_args,
                          "-avoid_negative_ts","make_zero",
                          "-f","mpegts",str(seg_tmp)])
                 else:
@@ -582,7 +627,7 @@ def generate_cut_video(video: Path, base: Path, tag: str, cut_plan: pd.DataFrame
                     run(["ffmpeg","-y","-hide_banner","-loglevel","error",
                          "-ss",str(pre_seek),"-i",str(video),
                          "-ss",str(start - pre_seek),"-t",str(end-start),
-                         "-c:v","h264_nvenc","-preset","p1","-c:a","aac",
+                         *encode_args,
                          "-avoid_negative_ts","make_zero",
                          "-f","mpegts",str(seg_tmp)])
                 # Atomic rename: only promote temp→final on success
@@ -672,7 +717,8 @@ def _compute_retain(cut_plan: pd.DataFrame, video_duration: float, debug_out: Pa
             raise RuntimeError(f"_compute_retain overlapping: retain[{i-1}]=({retain[i-1][0]:.3f},{retain[i-1][1]:.3f}) retain[{i}]=({retain[i][0]:.3f},{retain[i][1]:.3f}) — debug file: {debug_out}")
     return retain
 
-def process_one(pipe, batch_dir: Path, video: Path, force: bool, keep_temp: bool = False) -> dict:
+def process_one(pipe, batch_dir: Path, video: Path, force: bool, target_fps: int,
+                keep_temp: bool = False) -> dict:
     tag = safe_name(video.stem)
     base = batch_dir / f"{tag}_{RUN_TAG}"
     dirs(base)
@@ -769,12 +815,13 @@ def process_one(pipe, batch_dir: Path, video: Path, force: bool, keep_temp: bool
         jianying["剪映结束码"] = jianying["结束时间秒"].map(lambda x: pipe.sec_to_tc(float(x)))
     with pd.ExcelWriter(jianying_out, engine="openpyxl") as w: jianying.to_excel(w, index=False, sheet_name="transcript_review_timecode")
     full_review = write_full_review(pipe, main_asr, review, full_review_out)
-    plan_out, video_out, verify_out = generate_cut_video(video, base, tag, cut_plan, force)
+    plan_out, video_out, verify_out = generate_cut_video(video, base, tag, cut_plan, force, target_fps)
 
     # ── Stage 10: Boundary verification (re-ASR ±10s around splice points) ──
     if not SKIP_BOUNDARY_VERIFY:
         video_out, boundary_info = verify_boundaries(pipe, batch_dir, video_out, base, tag,
-                                                      duration, cut_plan, bad_words, force)
+                                                      duration, cut_plan, bad_words, force,
+                                                      target_fps, input_video=video)
     else:
         boundary_info = {
             "boundary_recut_triggered": False,
@@ -833,11 +880,14 @@ def process_one(pipe, batch_dir: Path, video: Path, force: bool, keep_temp: bool
 
 def verify_boundaries(pipe, batch_dir: Path, video_out: Path, base: Path, tag: str,
                       orig_duration: float, cut_plan: pd.DataFrame,
-                      bad_words: list, force: bool):
+                      bad_words: list, force: bool, target_fps: int,
+                      input_video: Path | None = None):
     """Stage 10: 边界验证 — 在输出视频每个拼接点前后各10秒重新ASR，发现漏裁就补裁。
     Returns (final_out, boundary_info)."""
     from qwen_asr import Qwen3ASRModel
     import soundfile as sf
+
+    encode_args = build_video_encode_args(target_fps)
 
     boundary_info = {
         "boundary_recut_triggered": False,
@@ -1037,7 +1087,7 @@ def verify_boundaries(pipe, batch_dir: Path, video_out: Path, base: Path, tag: s
             if rs == 0.0:
                 run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                      "-i", str(video_out), "-ss", "0", "-t", f"{re - rs:.3f}",
-                     "-c:v", "h264_nvenc", "-preset", "p1", "-c:a", "aac",
+                     *encode_args,
                      "-avoid_negative_ts", "make_zero",
                      "-f", "mpegts", str(seg_tmp)])
             else:
@@ -1045,7 +1095,7 @@ def verify_boundaries(pipe, batch_dir: Path, video_out: Path, base: Path, tag: s
                 run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                      "-ss", f"{pre_seek:.3f}", "-i", str(video_out),
                      "-ss", f"{rs - pre_seek:.3f}", "-t", f"{re - rs:.3f}",
-                     "-c:v", "h264_nvenc", "-preset", "p1", "-c:a", "aac",
+                     *encode_args,
                      "-avoid_negative_ts", "make_zero",
                      "-f", "mpegts", str(seg_tmp)])
             seg_tmp.replace(seg_file)
@@ -1254,15 +1304,26 @@ def main() -> None:
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--keep-temp", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--video", default="")
+    parser.add_argument("--target-fps", type=int, default=None,
+                        choices=[45, 60],
+                        help="Target output frame rate (required with --video)")
     args = parser.parse_args()
     set_env()
     pipe = load_pipeline()
-    inbox = Path(args.inbox)
-    videos = sorted((p for p in inbox.iterdir() if p.suffix.lower() in (".mp4", ".ts")), key=lambda p: p.name)
-    if args.limit:
-        videos = videos[:args.limit]
-    if not videos:
-        raise FileNotFoundError(f"No mp4/ts videos found in {inbox}")
+    if args.video:
+        if args.target_fps is None:
+            print("ERROR: --target-fps is required with --video", flush=True)
+            sys.exit(1)
+        videos = [Path(args.video)]
+        print(f"SINGLE_VIDEO_MODE: {videos[0]}  target_fps={args.target_fps}", flush=True)
+    else:
+        inbox = Path(args.inbox)
+        videos = sorted((p for p in inbox.iterdir() if p.suffix.lower() in (".mp4", ".ts")), key=lambda p: p.name)
+        if args.limit:
+            videos = videos[:args.limit]
+        if not videos:
+            raise FileNotFoundError(f"No mp4/ts videos found in {inbox}")
     batch_dir = Path(args.batch_dir) if args.batch_dir else WORK_ROOT / ("batch_system_c_cut_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
     batch_dir.mkdir(parents=True, exist_ok=True)
     print(f"BATCH_DIR={batch_dir}", flush=True)
@@ -1275,7 +1336,8 @@ def main() -> None:
             if result is not None:
                 print(f"SKIP existing PASS output: {video.name}", flush=True)
             else:
-                result = process_one(pipe, batch_dir, video, args.force, keep_temp=args.keep_temp)
+                result = process_one(pipe, batch_dir, video, args.force,
+                                     args.target_fps, keep_temp=args.keep_temp)
             results.append(result)
             write_pending_merge(batch_dir, results)
             notify_pushplus(f"[{i}/{len(videos)}] {result['result']} {video.name[:30]}", f"status={result['result']}\ncut_duration={result.get('cut_duration','')}\ncut_intervals={result.get('cut_intervals','')}")

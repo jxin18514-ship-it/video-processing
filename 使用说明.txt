@@ -102,8 +102,8 @@
     ============================================================
     结果: 20 PASS — 环境就绪，可以启动批处理
 
-    启动命令:
-      python 01_脚本\batch_system_c_cut_v2.py --inbox "你的视频目录" --batch-dir "输出目录"
+    启动命令（先 dry-run）:
+      python 01_脚本\batch_supervisor.py --inbox "你的视频目录" --batch-dir "输出目录" --dry-run
     ============================================================
 
   如果某些项显示 FAIL，按提示修复后再运行一次 check_env.py。
@@ -126,32 +126,46 @@
 
   cd 你解压的文件夹路径
 
-【第三步：启动处理】
+【第三步：dry-run 预览（推荐，先跑这个）】
 
   基本命令格式：
-    python 01_脚本\batch_system_c_cut_v2.py --inbox "视频所在文件夹" --batch-dir "输出文件夹"
+    python 01_脚本\batch_supervisor.py --inbox "视频所在文件夹" --batch-dir "输出文件夹" --dry-run
 
-  示例 1（视频在 G 盘，结果放 D 盘）：
-    python 01_脚本\batch_system_c_cut_v2.py --inbox "G:\待处理视频" --batch-dir "D:\处理结果"
+  这一步不会启动任何视频处理，只会：
+    1. 扫描所有视频
+    2. 按文件名前缀自动分组（如 kt(1).ts / kt(2).ts → 组 kt）
+    3. 计算每组 target_fps：
+       - 全 45fps → 45
+       - 全 60fps → 60
+       - 45/60 混合 → 45（统一到低帧率）
+       - 非标帧率 → BLOCK（不处理）
+    4. 生成 logs/group_target_fps.json（分组清单）
 
-  示例 2（只处理前 3 个视频，先测试一下）：
-    python 01_脚本\batch_system_c_cut_v2.py --inbox "G:\待处理视频" --batch-dir "D:\处理结果" --limit 3
+  确认 dry-run 输出无误后，再进入正式处理。
 
-  参数说明：
-    --inbox       输入视频所在的文件夹路径
-    --batch-dir   处理结果输出到哪个文件夹
-    --force       强制重跑全部（一般用不到）
-    --limit N     只处理前 N 个视频（测试用）
+【第四步：正式处理】
+
+  基本命令格式：
+    python 01_脚本\batch_supervisor.py --inbox "视频所在文件夹" --batch-dir "输出文件夹"
+
+  示例（视频在 G 盘，结果放 D 盘）：
+    python 01_脚本\batch_supervisor.py --inbox "G:\待处理视频" --batch-dir "D:\处理结果"
+
+  supervisor 会自动：
+    - 按组逐个处理视频
+    - 长视频（3h+）处理完冷却 5 分钟再跑下一个
+    - 写 supervisor_status.json 追踪每个视频进度
+    - 支持中断后续跑
 
   处理过程：
-    每个视频会经历 9 个阶段：
+    每个视频经历 9 个阶段：
       音频提取 → ASR 转录 → 违禁词检测 → 去重审核
       → 坏帧扫描 → 复核 → 幻觉扫描 → CLEAN 审核 → 视频输出
     一个 1 小时的视频大约需要 30-60 分钟处理。
 
   在 CMD 窗口中可以看到实时进度。
 
-【第四步：查看结果】
+【第五步：查看结果】
 
   处理完成后，输出目录下每个视频有两个关键文件：
 
@@ -161,20 +175,26 @@
     视频名_cut_filter_CLEAN_SYSTEM_C_CUT_V2_01.txt
       → 命中的违禁词列表（包含时间点、具体词、静音决定）
 
-  输出目录结构示例：
-    D:\处理结果\
-      ├── kt(5)_cut_final_CLEAN_SYSTEM_C_CUT_V2_01.mp4
-      ├── kt(5)_cut_filter_CLEAN_SYSTEM_C_CUT_V2_01.txt
-      ├── kt(5)_SYSTEM_C_CUT_V2_01\       ← 中间文件（不用管）
-      ├── kt(6)_cut_final_CLEAN_SYSTEM_C_CUT_V2_01.mp4
-      └── ...
+【第六步：合并视频（全部 PASS 后）】
+
+  dry-run 预览：
+    python 01_脚本\merge_after_process.py --batch-dir "D:\处理结果" --mode FULL_HQ --fps 45 --video-bitrate 10M
+
+  确认无误后执行：
+    python 01_脚本\merge_after_process.py --batch-dir "D:\处理结果" --mode FULL_HQ --fps 45 --video-bitrate 10M --merge
+
+  合并规则：
+    - FULL_HQ 模式：每组全部 PASS 才合并
+    - 参数一致走 -c copy（无重编码，秒级完成）
+    - 参数不一致不会自动回退重编码，需人工确认
+    - 默认不加 +faststart（本地播放/上传不需要）
 
 【中途中断怎么办？】
 
   如果处理过程中电脑重启、断电、或手动按了 Ctrl+C：
 
   不需要做任何特殊操作！直接重新执行相同的命令即可：
-    python 01_脚本\batch_system_c_cut_v2.py --inbox "G:\待处理视频" --batch-dir "D:\处理结果"
+    python 01_脚本\batch_supervisor.py --inbox "G:\待处理视频" --batch-dir "D:\处理结果"
 
   脚本会自动检测哪些视频已经处理完成，跳过它们，从上次中断的地方继续。
 
