@@ -31,6 +31,8 @@ python download_models.py
 - Qwen3-Forced-Aligner-0.6B（强制对齐，1.7 GB）
 - SenseVoice-Small（复核模型，0.9 GB）
 
+> **提示：** 如果模型不在部署包的 `03_模型/` 目录，可设置环境变量 `SYSTEM_C_MODEL_BASE` 指向模型所在的部署根目录。
+
 ### 3. 环境自检
 
 ```bash

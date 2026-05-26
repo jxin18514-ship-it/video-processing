@@ -30,9 +30,20 @@ _MODEL_LEAK = []  # 阻止模型析构崩溃：把 model 引用永久保留
 WORDLIST_DIR = BASE_DIR / "02_词库"
 
 # ── v2.0 Model paths ──
-QWEN3_MODEL_PATH = BASE_DIR / "03_模型" / "qwen3-asr-1.7b"
-QWEN3_ALIGNER_PATH = BASE_DIR / "03_模型" / "qwen3-forced-aligner-0.6b"
-SENSEVOICE_MODEL_PATH = BASE_DIR / "03_模型" / "models" / "iic" / "SenseVoiceSmall"
+# Deployment dir may not have models; set SYSTEM_C_MODEL_BASE or put under 03_模型
+_MODEL_BASE_ENV = os.environ.get("SYSTEM_C_MODEL_BASE")
+if _MODEL_BASE_ENV:
+    _MODEL_BASE = Path(_MODEL_BASE_ENV)
+elif (BASE_DIR / "03_模型").exists():
+    _MODEL_BASE = BASE_DIR
+else:
+    raise FileNotFoundError(
+        "Model directory not found. Put models under BASE_DIR/03_模型 "
+        "or set SYSTEM_C_MODEL_BASE environment variable to the deployment root."
+    )
+QWEN3_MODEL_PATH = _MODEL_BASE / "03_模型" / "qwen3-asr-1.7b"
+QWEN3_ALIGNER_PATH = _MODEL_BASE / "03_模型" / "qwen3-forced-aligner-0.6b"
+SENSEVOICE_MODEL_PATH = _MODEL_BASE / "03_模型" / "models" / "iic" / "SenseVoiceSmall"
 
 def write_status(batch_dir: Path, video_name: str, stage: str, detail: str) -> None:
     """每阶段写入状态文件，供仪表盘直接读取"""
@@ -78,11 +89,21 @@ def run(cmd: list[str]) -> None:
     else:
         subprocess.run(cmd, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
-def ffprobe(path: Path, fast: bool = False) -> dict:
+def ffprobe(path: Path, fast: bool = False, timeout: int = 120) -> dict:
     entries = "format=duration,size:stream=index,codec_type,codec_name,width,height,r_frame_rate"
     cmd = ["ffprobe","-v","error","-show_entries",entries,"-of","json",str(path)]
-    raw = subprocess.check_output(cmd, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
-    return json.loads(raw)
+    try:
+        raw = subprocess.check_output(
+            cmd,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=timeout,
+        )
+        return json.loads(raw)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"ffprobe timeout after {timeout}s: {path}") from e
 
 def get_video_fps(video_path: Path) -> float | None:
     """Read true frame rate, r_frame_rate first, avg_frame_rate fallback."""

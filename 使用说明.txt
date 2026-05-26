@@ -84,6 +84,9 @@
     All 3 models downloaded to 03_模型\
     Total size: ~7 GB
 
+  提示：如果模型不在部署包的 03_模型 目录，可设置环境变量
+  SYSTEM_C_MODEL_BASE 指向模型所在的部署根目录。
+
 【5. 环境检查】
 
   打开 CMD，在本项目文件夹下执行：
