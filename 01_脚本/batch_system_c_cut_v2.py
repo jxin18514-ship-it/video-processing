@@ -26,6 +26,7 @@ PIPELINE_PATH = BASE_DIR / "01_脚本" / "wanxiang_recheck_asr_v2_pipeline.py"
 RUN_TAG = "SYSTEM_C_CUT_V2_01"
 SKIP_SENSEVOICE = True  # 跳过SenseVoice复核，只用Qwen3结果
 SKIP_BOUNDARY_VERIFY = False  # 开启边界验证（Stage 10）
+FASTSTART = False  # 默认不加 +faststart，需要时用 --faststart 开启
 _MODEL_LEAK = []  # 阻止模型析构崩溃：把 model 引用永久保留
 WORDLIST_DIR = BASE_DIR / "02_词库"
 
@@ -662,9 +663,10 @@ def generate_cut_video(video: Path, base: Path, tag: str, cut_plan: pd.DataFrame
         run(["ffmpeg","-y","-hide_banner","-loglevel","error",
              "-f","concat","-safe","0","-i",str(concat_list),
              "-c","copy",str(concat_ts)])
+        faststart_args = ["-movflags","+faststart"] if FASTSTART else []
         run(["ffmpeg","-y","-hide_banner","-loglevel","error",
              "-i",str(concat_ts),"-c","copy",
-             "-movflags","+faststart",str(video_out)])
+             *faststart_args,str(video_out)])
         # Verify moov atom; auto-retry once if missing
         try:
             ffprobe(video_out)
@@ -672,7 +674,7 @@ def generate_cut_video(video: Path, base: Path, tag: str, cut_plan: pd.DataFrame
             print("WARN: moov atom missing, retrying +faststart...", flush=True)
             run(["ffmpeg","-y","-hide_banner","-loglevel","error",
                  "-i",str(concat_ts),"-c","copy",
-                 "-movflags","+faststart",str(video_out)])
+                 *faststart_args,str(video_out)])
             ffprobe(video_out)  # fail if still broken after retry
         for f in seg_files:
             if f.exists():
@@ -764,8 +766,8 @@ def process_one(pipe, batch_dir: Path, video: Path, force: bool, target_fps: int
     if len(main_asr) < min_rows:
         raise RuntimeError(f"ASR rows too few: {len(main_asr)} < {min_rows} (expected)")
 
-    # Release GPU immediately after ASR (subsequent stages are CPU-only)
-    cleanup_models()
+    # Keep Qwen3 on GPU — avoids CUDA fragmentation from reload cycles
+    # cleanup_models()  # DISABLED: repeated load/unload causes ACCESS_VIOLATION
 
     # ── Stage 2: Hit detection (direct match only) ──
     main_hits = pipe.detect_hits(main_asr, bad_words, "asr_qwen3_full_system_c")
@@ -806,8 +808,9 @@ def process_one(pipe, batch_dir: Path, video: Path, force: bool, target_fps: int
             write_status(batch_dir, video.name, "幻觉重试", f"{len(hallucinations)} 段 / {len(hallucination_windows := merge_interval_items(hallucinations, duration, pre=30.0, post=30.0))} 窗口")
             extra_recheck = run_sensevoice_recheck(pipe, video, base, tag, hallucination_windows, "hallucination_retry", force)
 
-    # ── Release GPU ──
-    cleanup_models()
+    # ── Release GPU (only after SenseVoice; Qwen3 stays if SKIP_SENSEVOICE) ──
+    if not SKIP_SENSEVOICE:
+        cleanup_models()
 
     # ── Stage 8: Final detection & CLEAN review ──
     detect_frames = [main_asr, to_detect_frame(recheck_asr)]
@@ -1131,9 +1134,10 @@ def verify_boundaries(pipe, batch_dir: Path, video_out: Path, base: Path, tag: s
     run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
          "-f", "concat", "-safe", "0", "-i", str(concat_list),
          "-c", "copy", str(concat_ts)])
+    faststart_args = ["-movflags","+faststart"] if FASTSTART else []
     run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
          "-i", str(concat_ts), "-c", "copy",
-         "-movflags", "+faststart", str(final_tmp)])
+         *faststart_args, str(final_tmp)])
     # Verify moov atom; auto-retry once if missing
     try:
         ffprobe(final_tmp)
@@ -1141,7 +1145,7 @@ def verify_boundaries(pipe, batch_dir: Path, video_out: Path, base: Path, tag: s
         print("WARN: boundary recut moov atom missing, retrying +faststart...", flush=True)
         run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
              "-i", str(concat_ts), "-c", "copy",
-             "-movflags", "+faststart", str(final_tmp)])
+             *faststart_args, str(final_tmp)])
         ffprobe(final_tmp)
 
     # Verify passed → replace original
@@ -1324,12 +1328,17 @@ def main() -> None:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--keep-temp", action="store_true")
+    parser.add_argument("--faststart", action="store_true",
+                        default=False,
+                        help="Enable +faststart moov relocation (slower, for web streaming)")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--video", default="")
     parser.add_argument("--target-fps", type=int, default=None,
                         choices=[45, 60],
                         help="Target output frame rate (required with --video)")
     args = parser.parse_args()
+    global FASTSTART
+    FASTSTART = args.faststart
     set_env()
     pipe = load_pipeline()
     if args.video:

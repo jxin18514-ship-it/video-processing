@@ -195,6 +195,48 @@ def detect_silent_severe(log_path: Path | None) -> bool:
     return True
 
 
+def is_model_loading_crash(log_path: Path | None, exit_code: int) -> bool:
+    """Return True if crash happened during Qwen3 model loading, before any ASR work.
+
+    Criteria:
+    1. exit_code == 3221225477 (ACCESS_VIOLATION)
+    2. Log contains "Loading checkpoint shards" but NOT "100%"
+    3. Log has NO evidence of ASR work (DONE chunk / segments / ASR complete)
+    """
+    if exit_code != 3221225477:
+        return False
+    if not log_path or not log_path.exists():
+        return True  # ACCESS_VIOLATION with no log at all => likely model loading
+
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        text_lower = text.lower()
+    except Exception:
+        return True
+
+    # Must have checkpoint loading attempt
+    if "loading checkpoint shards" not in text_lower:
+        return False
+
+    # Must NOT have completed model loading
+    if "loading checkpoint shards: 100%" in text_lower:
+        return False
+
+    # Must NOT have evidence of ASR work
+    asr_done_patterns = [
+        "done chunk",
+        "segments generated",
+        "asr finished",
+        "qwen3 asr segments:",
+        "qwen3 asr complete",
+    ]
+    for pat in asr_done_patterns:
+        if pat in text_lower:
+            return False
+
+    return True
+
+
 # -- strict post-subprocess PASS check ----------------------------------
 
 def check_pass_strict(batch_dir: Path, video_stem: str,
@@ -673,6 +715,7 @@ def main():
     sup.setdefault("severe_count", 0)
     sup.setdefault("recovery_entries", 0)
     sup.setdefault("resume_index", 0)
+    sup.setdefault("model_load_crash_count", 0)
     status["_supervisor"] = sup
 
     # --- resume from PAUSED_SYSTEM_UNSAFE ---
@@ -767,6 +810,7 @@ def main():
     prev_severe = False
     severe_count = sup["severe_count"]
     recovery_entries = sup["recovery_entries"]
+    model_load_crash_count = sup.get("model_load_crash_count", 0)
 
     for i in range(active_index, len(videos)):
         video = videos[i]
@@ -885,6 +929,42 @@ def main():
                   flush=True)
 
         sup["resume_index"] = i + 1
+
+        # -- model loading crash fuse (C) --
+        if passed:
+            model_load_crash_count = 0
+        elif is_model_loading_crash(log_path, exit_code):
+            model_load_crash_count += 1
+            print(f"  MODEL_LOAD_CRASH detected (count={model_load_crash_count}/2)", flush=True)
+        else:
+            # non-model-loading failure: keep current count, don't reset
+            pass
+
+        if model_load_crash_count >= 2:
+            sup["state"] = "PAUSED_MODEL_LOAD_CRASH"
+            sup["model_load_crash_count"] = model_load_crash_count
+            save_status(status_path, status)
+            reason_text = (
+                f"PAUSED_MODEL_LOAD_CRASH at {datetime.now().isoformat()}\n"
+                f"model_load_crash_count={model_load_crash_count}\n"
+                f"last_video={key}  exit_code={exit_code}\n"
+                f"resume_index={i + 1}  ({len(videos) - i - 1} videos remaining)\n"
+                "Cause: 2 consecutive Qwen3 model loading ACCESS_VIOLATION crashes.\n"
+                "Action: reboot computer to reset CUDA driver state, then re-run same command.\n"
+                "After reboot: supervisor will auto-resume from resume_index.\n"
+            )
+            pause_reason.write_text(reason_text, encoding="utf-8")
+            print(f"\n{'=' * 60}", flush=True)
+            print("PAUSED_MODEL_LOAD_CRASH -- 2 consecutive model loading crashes",
+                  flush=True)
+            print(f"  resume_index = {i + 1}", flush=True)
+            print(f"  Please REBOOT and re-run same command.", flush=True)
+            print(f"{'=' * 60}", flush=True)
+            log_recovery(recovery_log,
+                         f"PAUSED_MODEL_LOAD_CRASH count={model_load_crash_count} video={key}")
+            return
+
+        sup["model_load_crash_count"] = model_load_crash_count
 
         # -- cooldown / recovery --
         if passed:
